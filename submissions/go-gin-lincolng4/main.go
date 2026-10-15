@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"strconv"
 	"strings"
@@ -19,7 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 
 	"github.com/gin-gonic/gin"
 )
@@ -31,9 +32,22 @@ func envOr(key, def string) string {
 	return def
 }
 
+func init() {
+	// temp_store and mmap_size have no DSN key in mattn/go-sqlite3, so set them per connection.
+	sql.Register("sqlite3_feed", &sqlite3.SQLiteDriver{
+		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+			if _, err := conn.Exec("PRAGMA temp_store = MEMORY", nil); err != nil {
+				return err
+			}
+			_, err := conn.Exec("PRAGMA mmap_size = 268435456", nil)
+			return err
+		},
+	})
+}
+
 func connect(path string) *sql.DB {
-	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
-	db, err := sql.Open("sqlite3", dsn)
+	dsn := "file:" + path + "?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000&_cache_size=-65536&_locking_mode=EXCLUSIVE"
+	db, err := sql.Open("sqlite3_feed", dsn)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -54,6 +68,10 @@ func parsePostID(s string) (int64, bool) {
 
 func main() {
 	gin.SetMode(gin.ReleaseMode)
+
+	if os.Getenv("PPROF") == "1" {
+		go func() { log.Println(http.ListenAndServe("127.0.0.1:6060", nil)) }()
+	}
 
 	secret := []byte(envOr("JWT_SECRET", "twelve-dollar-challenge"))
 	db := connect(envOr("SQLITE_PATH", "seed/feed.db"))
@@ -79,7 +97,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	insertLikeStmt, err := db.Prepare(`INSERT INTO likes (user_id, post_id) VALUES (?, ?) ON CONFLICT (user_id, post_id) DO NOTHING`)
+	insertLikeStmt, err := db.Prepare(`INSERT INTO likes (user_id, post_id) SELECT ?, ? WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?) ON CONFLICT (user_id, post_id) DO NOTHING`)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -199,8 +217,19 @@ func main() {
 			c.JSON(http.StatusBadRequest, errBody("invalid post id"))
 			return
 		}
+
+		res, err := insertLikeStmt.Exec(c.GetInt64("uid"), id, id)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, errBody("internal server error"))
+			return
+		}
+		if n, _ := res.RowsAffected(); n == 1 {
+			c.JSON(http.StatusCreated, likeResponse{Liked: true, AlreadyLiked: false, PostID: id})
+			return
+		}
+
 		var one int
-		err := postExistsStmt.QueryRow(id).Scan(&one)
+		err = postExistsStmt.QueryRow(id).Scan(&one)
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, errBody("post not found"))
 			return
@@ -209,18 +238,7 @@ func main() {
 			c.JSON(http.StatusInternalServerError, errBody("internal server error"))
 			return
 		}
-
-		res, err := insertLikeStmt.Exec(c.GetInt64("uid"), id)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, errBody("internal server error"))
-			return
-		}
-		n, _ := res.RowsAffected()
-		if n == 0 {
-			c.JSON(http.StatusOK, likeResponse{Liked: true, AlreadyLiked: true, PostID: id})
-			return
-		}
-		c.JSON(http.StatusCreated, likeResponse{Liked: true, AlreadyLiked: false, PostID: id})
+		c.JSON(http.StatusOK, likeResponse{Liked: true, AlreadyLiked: true, PostID: id})
 	})
 
 	addr := net.JoinHostPort(envOr("HOST", "127.0.0.1"), envOr("PORT", "3000"))
