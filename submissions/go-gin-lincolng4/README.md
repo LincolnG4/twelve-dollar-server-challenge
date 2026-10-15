@@ -11,6 +11,20 @@
 
 All dependency versions, transitive ones included, are pinned in `go.sum`.
 
+## Why Gin
+
+[Gin's benchmarks](https://gin-gonic.com/en/docs/benchmarks/) (Gin v1.12.0, March 2026) put it at
+the top of the Go router rankings: first place on the GitHub API workload (203 routes, all methods)
+at ~10 µs/op with **zero heap allocations per route**, and top-tier on every other routing test.
+Zero-alloc routing matters here because the box has one vCPU — routing work never turns into GC
+pressure. Gin is also near the top on routing-structure memory (59 KB for 203 routes).
+
+Just as important is what Gin is *not*: a benchmark-only framework. It's a mainstream, batteries-light
+framework on top of the standard `net/http` — route groups, middleware, path params, nothing exotic.
+The goal was to keep this submission reading like a normal enterprise API you'd maintain at work,
+not a hand-tuned benchmark artifact. The speed comes from the database path (prepared statements,
+pragmas, hand-verified JWT), not from giving up readability.
+
 ## Running it
 
 ```bash
@@ -37,10 +51,11 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   slices written directly.
 - **Gin in release mode, no middleware but recovery.** No logger means nothing written to stdout
   per request, and trusted proxies are off. Unknown paths hit `NoRoute` and return a real 404.
-- **Pragmas**: `journal_mode=WAL`, `synchronous=NORMAL`, 5 s busy timeout, and a 64 MiB page cache
-  via mattn/go-sqlite3 DSN keys (`_journal_mode`, `_synchronous`, `_busy_timeout`, `_cache_size`),
-  plus `temp_store=MEMORY` through a `ConnectHook` so every pooled connection gets it (rule 6
-  compliant). Note the driver has no generic `_pragma=` DSN syntax — that's modernc.org/sqlite.
+- **Pragmas**: `journal_mode=WAL`, `synchronous=NORMAL` (rule 6), 5 s busy timeout,
+  `locking_mode=EXCLUSIVE`, and a 64 MiB page cache via mattn/go-sqlite3 DSN keys
+  (`_journal_mode`, `_synchronous`, `_busy_timeout`, `_locking_mode`, `_cache_size`), plus
+  `temp_store=MEMORY` and a 256 MiB `mmap_size` through a `ConnectHook` so every pooled connection
+  gets them. Note the driver has no generic `_pragma=` DSN syntax — that's modernc.org/sqlite.
 - **Connection pool capped at 16.** One vCPU can't usefully run more SQLite work in parallel; the
   cap bounds memory and file handles under load.
 - **The schema is used exactly as given.** `created_at` comes from the column default
