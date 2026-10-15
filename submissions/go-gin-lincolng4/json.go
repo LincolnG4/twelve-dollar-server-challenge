@@ -1,7 +1,5 @@
 package main
 
-// Wire types. Field order is the response key order — SPEC.md requires it exact.
-
 type Post struct {
 	ID        int64  `json:"id"`
 	Body      string `json:"body"`
