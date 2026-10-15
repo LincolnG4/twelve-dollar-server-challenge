@@ -1,28 +1,50 @@
-# go-gin-lincolng4
+# Go + Gin
 
-- **Language**: Go 1.27.2 (pinned in `install.sh`, `go 1.26.0` directive in `go.mod`)
-- **Framework**: gin 1.12.0
-- **SQLite driver**: mattn/go-sqlite3 1.14.52 (CGO)
+| | |
+|---|---|
+| Language | Go 1.27.2 (pinned in `install.sh`) |
+| Framework | Gin 1.12.0 |
+| Server | the standard library `net/http` server that Gin runs on |
+| SQLite driver | mattn/go-sqlite3 1.14.52 (CGO; SQLite is compiled into the binary) |
+| JSON | the standard library `encoding/json` |
+| **Nginx or direct** | **Direct**: serves `0.0.0.0:80` itself |
 
-## Nginx or direct
+All dependency versions, transitive ones included, are pinned in `go.sum`.
 
-Both work — the server binds `HOST:PORT` from the environment, so run it behind Nginx on
-`127.0.0.1:3000` (as in the video) or directly on `0.0.0.0:80`. The server never idle-closes
-connections, satisfying Nginx's 65 s keep-alive requirement.
+## Running it
 
-## Optimizations
+```bash
+sudo bash install.sh   # apt: build-essential, curl; installs Go 1.27.2 to /usr/local
+bash build.sh          # CGO build to bin/server, using go.sum
+SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
+```
 
-- **Prepared statements** for all five queries: the query plan is built once at startup
-  (explicitly allowed by rule 5 — every request still reads from SQLite).
-- **WAL + `synchronous=NORMAL`** with a 5 s busy timeout, set via DSN pragmas, so readers
-  don't block behind the single writer (rule 6 compliant).
-- **Connection pool capped at 16**: plenty for 1 vCPU, bounds memory and file handles.
-- **Hand-rolled JWT verification**: HMAC-SHA256 from the standard library with a pooled
-  `hash.Hash`, signature checked before any JSON parsing, and the alg pinned to HS256.
-  No JWT library, no reflection.
-- **Structs instead of maps** for responses, so JSON key order is exact and encoding is
-  allocation-light; error bodies on auth paths are pre-serialized byte slices.
-- **gin release mode, no logger middleware**: nothing written to stdout per request.
+## Optimizations, and why
 
-The database schema is used exactly as given; `created_at` values come from the column
-default (`strftime('%Y-%m-%dT%H:%M:%fZ','now')`) via `INSERT ... RETURNING`.
+- **Direct instead of Nginx.** On one vCPU, Nginx's CPU comes straight out of the Go process's
+  budget. `net/http` already handles thousands of idle keep-alive connections with goroutines, and
+  Gin's default server has no read or idle timeout, so connections are never closed on the client.
+- **Prepared statements for every query.** The query plan is built once at startup instead of per
+  request (explicitly allowed by rule 5 — every request still reads from SQLite). The feed, post
+  lookup, and like insert are each a single statement.
+- **Hand-rolled JWT verification** with `crypto/hmac` + `crypto/sha256` on every request: HS256
+  pinned, constant-time signature compare, `exp` checked (missing counts as expired). The signature
+  is verified before any JSON is parsed, so garbage tokens are rejected with zero allocation. The
+  `hash.Hash` comes from a `sync.Pool`, so no JWT library and no per-request hasher allocation. No
+  caching of verifications (rule 5).
+- **Structs instead of maps** for responses, so the JSON key order is exactly what `SPEC.md`
+  requires and encoding is allocation-light. The three 401 error bodies are pre-serialized byte
+  slices written directly.
+- **Gin in release mode, no middleware but recovery.** No logger means nothing written to stdout
+  per request, and trusted proxies are off. Unknown paths hit `NoRoute` and return a real 404.
+- **Pragmas via the DSN**: `journal_mode=WAL`, `synchronous=NORMAL` (rule 6), and a 5 s busy
+  timeout, so readers never block behind the writer and a writer never errors instantly on a lock.
+- **Connection pool capped at 16.** One vCPU can't usefully run more SQLite work in parallel; the
+  cap bounds memory and file handles under load.
+- **The schema is used exactly as given.** `created_at` comes from the column default
+  (`strftime('%Y-%m-%dT%H:%M:%fZ','now')`), read back in the same statement via
+  `INSERT ... RETURNING`.
+
+## License
+
+MIT, under the repo's [license](../../LICENSE).
